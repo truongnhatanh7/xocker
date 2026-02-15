@@ -15,7 +15,15 @@ After phase 1 it should be able to run on Linux:
 curl -LO https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-minirootfs-3.19.0-x86_64.tar.gz
 tar -xzf alpine-minirootfs-3.19.0-x86_64.tar.gz -C rootfs
 
-# Run a command (rootfs is hard-coded)
-sudo env "PATH=$PATH" go run main.go run /bin/sh "echo 1"                                                                                   ❮❮❮
+# Build
+make build
+
+# Run a command to change hostname in isolated container
+sudo ./bin/xocker run --rootfs="./rootfs" -- /bin/sh -c "hostname iso-truongnhatanh7; hostname" 
+> iso-truongnhatanh7
+
+# Then on host computer, rerun hostname to check isolation
+hostname
+> host-truongnhatanh7
 ```
 

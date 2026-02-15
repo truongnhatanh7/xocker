@@ -5,3 +5,5 @@ rootfs
 bin
 
 *.tar.*
+
+old_root

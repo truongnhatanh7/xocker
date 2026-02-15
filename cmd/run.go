@@ -15,7 +15,8 @@ var (
 )
 
 var runCmd = &cobra.Command{
-	Use: "run [flags] command [args...]",
+	Use:  "run",
+	Args: cobra.ArbitraryArgs,
 	Run: func(cmd *cobra.Command, args []string) {
 		command := args[0]
 		commandArgs := args[1:]
@@ -26,7 +27,11 @@ var runCmd = &cobra.Command{
 		fmt.Printf("Command: %s\n", command)
 		fmt.Printf("Args: %v\n", commandArgs)
 
-		if err := container.RunContainer(commandArgs); err != nil {
+		if err := container.RunContainer(&container.Container{
+			Cmd:    command,
+			Args:   commandArgs,
+			RootFS: rootfs,
+		}); err != nil {
 			os.Exit(1)
 		}
 	},

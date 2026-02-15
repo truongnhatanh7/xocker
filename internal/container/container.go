@@ -5,38 +5,46 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
 
 	"github.com/truongnhatanh7/xocker/internal/common"
 	"golang.org/x/sys/unix"
 )
 
-var HARD_CODED_ROOTFS = "./rootfs"
+type Container struct {
+	Cmd    string
+	Args   []string
+	RootFS string
+}
 
-func RunContainer(cmdArgs []string) error {
-	if os.Getenv("_IN_CONTAINER") == "1" {
-		return handleChild(cmdArgs)
+func RunContainer(container *Container) error {
+	if container == nil {
+		panic("cotainer is nil")
 	}
+
+	if os.Getenv("_IN_CONTAINER") == "1" {
+		return handleChild(container)
+	}
+
+	// process rootfs dir, "." doesn't work in some cases -> resolve to full path
+	absRootFS, err := filepath.Abs(container.RootFS)
+	common.Must(err)
+	container.RootFS = absRootFS
 
 	self, err := os.Executable()
 	common.Must(err)
 	fmt.Println("self", self)
 
 	// ensure rootfs exists
-	if _, err := os.Stat(HARD_CODED_ROOTFS); err != nil {
+	if _, err := os.Stat(container.RootFS); err != nil {
 		fmt.Println(err)
 		return err
 	}
-	fmt.Println("rootfs exists")
-
-	fmt.Printf("cmdArgs %#v\n", cmdArgs)
 
 	// check ps aux count before create ns
 	checkPsAuxCount()
 
-	// spawn new ns
-	c := exec.Command(
+	unshareCmd := []string{
 		"unshare",
 		"--mount",
 		"--uts",
@@ -45,11 +53,20 @@ func RunContainer(cmdArgs []string) error {
 		"--pid",
 		"--fork",
 		"--mount-proc",
-		"--",
-		self, "run", "/bin/sh",
-		cmdArgs[0],
+	}
+
+	cCmd := append(
+		unshareCmd, "--",
+		self, "run", "--rootfs="+fmt.Sprintf("%s", container.RootFS), container.Cmd, "--",
 	)
-	fmt.Println(c.String())
+	cCmd = append(cCmd, container.Args...)
+
+	// spawn new ns
+	c := exec.Command(
+		cCmd[0],
+		cCmd[1:]...,
+	)
+	fmt.Printf("c %s\n", c.String())
 
 	c.Stdin = os.Stdin
 	c.Stdout = os.Stdout
@@ -62,44 +79,40 @@ func RunContainer(cmdArgs []string) error {
 	return nil
 }
 
-func handleChild(cmdArgs []string) error {
-	// checkPsAuxCount()
-
+func handleChild(container *Container) error {
 	// mount nescessay stuff
 	//
 	// rootfs must be a mount point
 	// mount proc - pseudo filesystem
 	// mount tmpfs - dev
-
-	common.Must(syscall.Mount("proc", HARD_CODED_ROOTFS+"/proc", "proc", 0, ""))
-	common.Must(syscall.Mount("tmpfs", HARD_CODED_ROOTFS+"/dev", "tmpfs", 0, ""))
+	common.Must(syscall.Mount("proc", container.RootFS+"/proc", "proc", 0, ""))
+	common.Must(syscall.Mount("tmpfs", container.RootFS+"/dev", "tmpfs", 0, ""))
 	// Best-effort minimal device nodes (requires CAP_MKNOD; may fail rootless)
-	common.Must(mknodChar(HARD_CODED_ROOTFS+"/dev/null", 0o666, 1, 3))
-	common.Must(mknodChar(HARD_CODED_ROOTFS+"/dev/zero", 0o666, 1, 5))
-	common.Must(mknodChar(HARD_CODED_ROOTFS+"/dev/random", 0o666, 1, 8))
-	common.Must(mknodChar(HARD_CODED_ROOTFS+"/dev/urandom", 0o666, 1, 9))
+	common.Must(mknodChar(container.RootFS+"/dev/null", 0o666, 1, 3))
+	common.Must(mknodChar(container.RootFS+"/dev/zero", 0o666, 1, 5))
+	common.Must(mknodChar(container.RootFS+"/dev/random", 0o666, 1, 8))
+	common.Must(mknodChar(container.RootFS+"/dev/urandom", 0o666, 1, 9))
 
 	fmt.Println("done mounting")
 
-	// checkPsAuxCount()
-
 	// pivot root
 	// make newroot a mountpoint
-	unix.Mount(HARD_CODED_ROOTFS, HARD_CODED_ROOTFS, "", unix.MS_BIND|unix.MS_REC, "")
-	common.Must(os.MkdirAll(HARD_CODED_ROOTFS+"/old_root", 0o777))
-	common.Must(unix.PivotRoot(HARD_CODED_ROOTFS, HARD_CODED_ROOTFS+"/old_root"))
+	//
+	fmt.Println("rootfs", container.RootFS)
+	_, err := os.Stat(container.RootFS)
+	common.Must(err)
+	unix.Mount(container.RootFS, container.RootFS, "", unix.MS_BIND|unix.MS_REC, "")
+	common.Must(os.MkdirAll(container.RootFS+"/old_root", 0o777))
+	common.Must(unix.PivotRoot(container.RootFS, container.RootFS+"/old_root"))
 	common.Must(os.Chdir("/"))
 	common.Must(unix.Unmount("./old_root", syscall.MNT_DETACH))
 	fmt.Println("done pivot root")
 
 	// actually exec input command
-	fmt.Println(cmdArgs)
-
-	_, err := os.Stat("/bin/sh")
-	common.Must(err)
-
-	realCmd := strings.Join(cmdArgs, " ")
-	common.Must(syscall.Exec("/bin/sh", []string{"sh", "-c", realCmd}, []string{}))
+	argv := []string{container.Cmd}
+	argv = append(argv, container.Args...)
+	fmt.Printf("argv %#v\n===========\n\n", argv)
+	common.Must(syscall.Exec(container.Cmd, argv, []string{}))
 
 	return nil
 }
