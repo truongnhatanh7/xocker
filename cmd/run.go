@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/truongnhatanh7/xocker/internal/container"
 )
 
 var (
@@ -23,6 +25,10 @@ var runCmd = &cobra.Command{
 		fmt.Printf("TTY: %v\n", tty)
 		fmt.Printf("Command: %s\n", command)
 		fmt.Printf("Args: %v\n", commandArgs)
+
+		if err := container.RunContainer(commandArgs); err != nil {
+			os.Exit(1)
+		}
 	},
 }
 
