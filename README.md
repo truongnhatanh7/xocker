@@ -11,14 +11,11 @@ Concepts:
 
 After phase 1 it should be able to run on Linux:
 ```bash
-# Create Alpine rootfs
-mkdir /tmp/alpine-rootfs
-docker export $(docker create alpine) | tar -C /tmp/alpine-rootfs -xf -
+# Get alpine rootfs
+curl -LO https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-minirootfs-3.19.0-x86_64.tar.gz
+tar -xzf alpine-minirootfs-3.19.0-x86_64.tar.gz -C rootfs
 
-# Run a command
-sudo ./build/hocker run --rootfs /tmp/alpine-rootfs /bin/echo "Hello from Hocker!"
-
-# Interactive shell
-sudo ./build/hocker run -it --rootfs /tmp/alpine-rootfs /bin/sh
+# Run a command (rootfs is hard-coded)
+sudo env "PATH=$PATH" go run main.go run /bin/sh "echo 1"                                                                                   ❮❮❮
 ```
-Q: For Mac, we should run this in VM?
+
