@@ -1,22 +1,28 @@
 package container
 
 import (
+	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
+	"github.com/creack/pty"
 	"github.com/truongnhatanh7/xocker/internal/common"
 	"github.com/truongnhatanh7/xocker/internal/logger"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 )
 
 type Container struct {
-	Cmd    string
-	Args   []string
-	RootFS string
-	Flags  []string
+	Cmd         string
+	Args        []string
+	RootFS      string
+	Flags       []string
+	Interactive bool
 }
 
 func RunContainer(container *Container) error {
@@ -88,13 +94,32 @@ func handleChild(container *Container) error {
 	// rootfs must be a mount point
 	// mount proc - pseudo filesystem
 	// mount tmpfs - dev
+	common.Must(os.MkdirAll(container.RootFS+"/proc", 0755))
 	common.Must(syscall.Mount("proc", container.RootFS+"/proc", "proc", 0, ""))
+
+	common.Must(os.MkdirAll(container.RootFS+"/dev", 0755))
 	common.Must(syscall.Mount("tmpfs", container.RootFS+"/dev", "tmpfs", 0, ""))
+
+	// required mount for interactive mode
+	common.Must(os.MkdirAll(container.RootFS+"/dev/pts", 0755))
+	common.Must(
+		syscall.Mount(
+			"devpts",
+			container.RootFS+"/dev/pts",
+			"devpts",
+			syscall.MS_NOSUID|syscall.MS_NOEXEC,
+			"newinstance,ptmxmode=0666,mode=620,gid=5",
+		),
+	)
+	common.Must(mknodChar(container.RootFS+"/dev/tty", 0o666, 5, 0))
+	common.Must(mknodChar(container.RootFS+"/dev/ptmx", 0o666, 5, 2))
+
 	// Best-effort minimal device nodes (requires CAP_MKNOD; may fail rootless)
 	common.Must(mknodChar(container.RootFS+"/dev/null", 0o666, 1, 3))
 	common.Must(mknodChar(container.RootFS+"/dev/zero", 0o666, 1, 5))
 	common.Must(mknodChar(container.RootFS+"/dev/random", 0o666, 1, 8))
 	common.Must(mknodChar(container.RootFS+"/dev/urandom", 0o666, 1, 9))
+
 	logger.Log.Debug("done mounting")
 
 	// pivot root
@@ -113,6 +138,52 @@ func handleChild(container *Container) error {
 	argv := []string{container.Cmd}
 	argv = append(argv, container.Args...)
 	logger.Log.Debug("argv", zap.Strings("argv", argv))
+
+	// rename hostname of container
+	chc := exec.Command("hostname", "container_"+time.Now().Format(time.RFC3339Nano))
+	common.Must(chc.Start())
+
+	if container.Interactive {
+		// use exec command insteaqd of syscall.Exec to maintain connection
+		// with go runtime, cuz we're setting up pty master-slave, ...
+		cmd := exec.Command(container.Cmd)
+
+		// start pty
+		ptmx, err := pty.Start(cmd)
+		common.Must(err)
+		defer ptmx.Close()
+
+		// turn off canonical mode
+		oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+		common.Must(err)
+		defer term.Restore(int(os.Stdin.Fd()), oldState)
+
+		// handle resize -> propagate resize events
+		go func() {
+			ch := make(chan os.Signal, 1)
+			signal.Notify(ch, syscall.SIGWINCH)
+
+			go func() {
+				for range ch {
+					pty.InheritSize(os.Stdin, ptmx)
+				}
+			}()
+			ch <- syscall.SIGWINCH
+		}()
+
+		// copy io
+		go func() {
+			//user input -> master
+			io.Copy(ptmx, os.Stdin)
+		}()
+		// master output -> stdout
+		io.Copy(os.Stdout, ptmx)
+
+		// call wait to properly clean up
+		common.Must(cmd.Wait())
+
+		return nil
+	}
 	common.Must(syscall.Exec(container.Cmd, argv, []string{}))
 
 	return nil

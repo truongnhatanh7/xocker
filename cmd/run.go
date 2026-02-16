@@ -16,7 +16,6 @@ import (
 var (
 	rootfs      string
 	interactive bool
-	tty         bool
 )
 
 var runCmd = &cobra.Command{
@@ -28,7 +27,6 @@ var runCmd = &cobra.Command{
 
 		logger.Log.Debug("rootfs", zap.String("rootfs", rootfs))
 		logger.Log.Debug("interactive", zap.Bool("interactive", interactive))
-		logger.Log.Debug("tty", zap.Bool("tty", tty))
 		logger.Log.Debug("command", zap.String("command", command))
 		logger.Log.Debug("commandArgs", zap.Strings("commandArgs", commandArgs))
 
@@ -46,10 +44,11 @@ var runCmd = &cobra.Command{
 		})
 
 		if err := container.RunContainer(&container.Container{
-			Cmd:    command,
-			Args:   commandArgs,
-			RootFS: rootfs,
-			Flags:  flags,
+			Cmd:         command,
+			Args:        commandArgs,
+			RootFS:      rootfs,
+			Flags:       flags,
+			Interactive: interactive,
 		}); err != nil {
 			os.Exit(1)
 		}
@@ -58,8 +57,8 @@ var runCmd = &cobra.Command{
 
 func init() {
 	runCmd.Flags().StringVar(&rootfs, "rootfs", "", "Path to the root filesystem")
-	runCmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "Keep STDIN open")
-	runCmd.Flags().BoolVarP(&tty, "tty", "t", false, "Allocate a pseudo-TTY")
+	// for simplicity: handle both stdin and tty, instead of 2 flags -i and -t
+	runCmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "Interactive mode")
 
 	rootCmd.AddCommand(runCmd)
 }

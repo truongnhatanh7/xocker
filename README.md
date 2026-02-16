@@ -25,5 +25,11 @@ sudo ./bin/xocker run --rootfs="./rootfs" -- /bin/sh -c "hostname iso-truongnhat
 # Then on host computer, rerun hostname to check isolation
 hostname
 > host-truongnhatanh7
+
+# Interactive mode (-i flag)
+# Works by disable terminal canonical mode
+#   and Set up PTY, master on Go runtime, slave connect to container
+sudo ./bin/xocker run --rootfs="./rootfs" --level="dev" -i -- /bin/ash
+> <now you're inside the container, try to echo something :D>
 ```
 
