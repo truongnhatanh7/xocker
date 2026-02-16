@@ -1,15 +1,19 @@
 package container
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/truongnhatanh7/xocker/internal/cgroupv2"
 	"github.com/truongnhatanh7/xocker/internal/common"
 	"github.com/truongnhatanh7/xocker/internal/logger"
 	"go.uber.org/zap"
@@ -23,6 +27,8 @@ type Container struct {
 	RootFS      string
 	Flags       []string
 	Interactive bool
+	CPUQuota    uint64
+	Mem         uint64
 }
 
 func RunContainer(container *Container) error {
@@ -83,7 +89,29 @@ func RunContainer(container *Container) error {
 
 	os.Setenv("_IN_CONTAINER", "1")
 	c.Env = os.Environ()
-	common.Must(c.Run())
+
+	common.Must(c.Start())
+
+	realPid, err := waitForChildPID(c.Process.Pid, 3*time.Second) // choose an appropriate timeout
+	if err != nil {
+		// best effort fallback: if we cannot find child, kill and return error
+		c.Process.Kill()
+		common.Must(fmt.Errorf("could not find forked child of unshare (%d): %w", c.Process.Pid, err))
+	}
+	logger.Log.Debug("realpid", zap.Int("pid", realPid))
+	cg := cgroupv2.NewCgroupV2("container_" + time.Now().Format(time.RFC3339Nano))
+	cg.Limit(&cgroupv2.CgroupV2SetSpecs{
+		ApplyToPid: realPid,
+		CPUSpec: &cgroupv2.CPUSpec{
+			Quota: container.CPUQuota,
+		},
+		MemSpec: &cgroupv2.MemSpec{
+			Limit: container.Mem,
+		},
+	})
+	defer cg.Destroy()
+
+	common.Must(c.Wait())
 
 	return nil
 }
@@ -239,4 +267,35 @@ func mknodChar(path string, perm uint32, major, minor uint32) error {
 	}
 
 	return os.Chmod(path, os.FileMode(perm))
+}
+
+func waitForChildPID(unsharePid int, timeout time.Duration) (int, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		pid, err := getChildPID(unsharePid)
+		if err == nil {
+			return pid, nil
+		}
+		// if children file exists but is empty, retry until timeout
+		if time.Now().After(deadline) {
+			return 0, fmt.Errorf("timed out waiting for child of %d: last error: %w", unsharePid, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+func getChildPID(unsharePid int) (int, error) {
+	// path like: /proc/1234/task/1234/children
+	path := fmt.Sprintf("/proc/%d/task/%d/children", unsharePid, unsharePid)
+	b, err := os.ReadFile(path)
+	common.Must(err)
+
+	s := strings.TrimSpace(string(b))
+	if s == "" {
+		return 0, fmt.Errorf("no children for %d", unsharePid)
+	}
+	parts := strings.Fields(s)
+	pid, err := strconv.Atoi(parts[0])
+	common.Must(err)
+
+	return pid, nil
 }

@@ -8,7 +8,9 @@ require (
 )
 
 require (
+	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
 	github.com/creack/pty v1.1.24 // indirect
+	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 	go.uber.org/multierr v1.10.0 // indirect

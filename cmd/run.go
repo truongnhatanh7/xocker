@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"github.com/truongnhatanh7/xocker/internal/cgroupv2"
 	"github.com/truongnhatanh7/xocker/internal/common"
 	"github.com/truongnhatanh7/xocker/internal/container"
 	"github.com/truongnhatanh7/xocker/internal/logger"
@@ -16,6 +17,8 @@ import (
 var (
 	rootfs      string
 	interactive bool
+	cpu         uint64
+	mem         uint64
 )
 
 var runCmd = &cobra.Command{
@@ -49,6 +52,8 @@ var runCmd = &cobra.Command{
 			RootFS:      rootfs,
 			Flags:       flags,
 			Interactive: interactive,
+			CPUQuota:    cpu,
+			Mem:         mem,
 		}); err != nil {
 			os.Exit(1)
 		}
@@ -59,6 +64,8 @@ func init() {
 	runCmd.Flags().StringVar(&rootfs, "rootfs", "", "Path to the root filesystem")
 	// for simplicity: handle both stdin and tty, instead of 2 flags -i and -t
 	runCmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "Interactive mode")
+	runCmd.Flags().Uint64VarP(&cpu, "cpu", "c", cgroupv2.HALF_CPU_QUOTA, "CPU quota (CPUQuotaPerSecUSec)")
+	runCmd.Flags().Uint64VarP(&mem, "mem", "m", 128, "Mem limit")
 
 	rootCmd.AddCommand(runCmd)
 }
