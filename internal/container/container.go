@@ -1,13 +1,14 @@
 package container
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"syscall"
 
 	"github.com/truongnhatanh7/xocker/internal/common"
+	"github.com/truongnhatanh7/xocker/internal/logger"
+	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 )
 
@@ -15,6 +16,7 @@ type Container struct {
 	Cmd    string
 	Args   []string
 	RootFS string
+	Flags  []string
 }
 
 func RunContainer(container *Container) error {
@@ -33,13 +35,10 @@ func RunContainer(container *Container) error {
 
 	self, err := os.Executable()
 	common.Must(err)
-	fmt.Println("self", self)
 
 	// ensure rootfs exists
-	if _, err := os.Stat(container.RootFS); err != nil {
-		fmt.Println(err)
-		return err
-	}
+	_, err = os.Stat(container.RootFS)
+	common.Must(err)
 
 	// check ps aux count before create ns
 	checkPsAuxCount()
@@ -56,9 +55,13 @@ func RunContainer(container *Container) error {
 	}
 
 	cCmd := append(
-		unshareCmd, "--",
-		self, "run", "--rootfs="+fmt.Sprintf("%s", container.RootFS), container.Cmd, "--",
+		unshareCmd,
+		"--",
+		self, "run",
 	)
+	cCmd = append(cCmd, container.Flags...)
+	cCmd = append(cCmd, "--")
+	cCmd = append(cCmd, container.Cmd)
 	cCmd = append(cCmd, container.Args...)
 
 	// spawn new ns
@@ -66,7 +69,7 @@ func RunContainer(container *Container) error {
 		cCmd[0],
 		cCmd[1:]...,
 	)
-	fmt.Printf("c %s\n", c.String())
+	logger.Log.Debug("c command", zap.String("c", c.String()))
 
 	c.Stdin = os.Stdin
 	c.Stdout = os.Stdout
@@ -92,13 +95,11 @@ func handleChild(container *Container) error {
 	common.Must(mknodChar(container.RootFS+"/dev/zero", 0o666, 1, 5))
 	common.Must(mknodChar(container.RootFS+"/dev/random", 0o666, 1, 8))
 	common.Must(mknodChar(container.RootFS+"/dev/urandom", 0o666, 1, 9))
-
-	fmt.Println("done mounting")
+	logger.Log.Debug("done mounting")
 
 	// pivot root
 	// make newroot a mountpoint
 	//
-	fmt.Println("rootfs", container.RootFS)
 	_, err := os.Stat(container.RootFS)
 	common.Must(err)
 	unix.Mount(container.RootFS, container.RootFS, "", unix.MS_BIND|unix.MS_REC, "")
@@ -106,12 +107,12 @@ func handleChild(container *Container) error {
 	common.Must(unix.PivotRoot(container.RootFS, container.RootFS+"/old_root"))
 	common.Must(os.Chdir("/"))
 	common.Must(unix.Unmount("./old_root", syscall.MNT_DETACH))
-	fmt.Println("done pivot root")
+	logger.Log.Debug("done pivot root")
 
 	// actually exec input command
 	argv := []string{container.Cmd}
 	argv = append(argv, container.Args...)
-	fmt.Printf("argv %#v\n===========\n\n", argv)
+	logger.Log.Debug("argv", zap.Strings("argv", argv))
 	common.Must(syscall.Exec(container.Cmd, argv, []string{}))
 
 	return nil
@@ -133,7 +134,7 @@ func checkPsAuxCount() {
 
 	common.Must(ps.Wait())
 
-	fmt.Println("Process count:", string(output))
+	logger.Log.Debug("ps aux", zap.String("count", string(output)))
 }
 
 func checkPsAuxCountFull() {
@@ -144,7 +145,7 @@ func checkPsAuxCountFull() {
 		panic(err)
 	}
 
-	fmt.Println(out)
+	logger.Log.Debug("px aux full", zap.String("out", string(out)))
 }
 
 func mknodChar(path string, perm uint32, major, minor uint32) error {
@@ -153,7 +154,7 @@ func mknodChar(path string, perm uint32, major, minor uint32) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	} else {
-		fmt.Println("mknodChar err", err)
+		logger.Log.Debug("mknodChar", zap.Error(err))
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
