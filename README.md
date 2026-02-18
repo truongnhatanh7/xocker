@@ -57,9 +57,16 @@ sudo ./bin/xocker run --rootfs="./rootfs" --level="dev" -i --cpu=500000 --mem=12
 ```
 
 
-## Phase 4: OverlayFS (TODO)
+## Phase 4: OverlayFS
 Concepts:
 - Overlay
 
 Creates new file while running the image shouldn't create that file on host
+```
+sudo ./bin/xocker run --rootfs="./rootfs" --level="dev" -i -- /bin/ash
+
+> touch test.txt
+> exit
+# this file doesn't exit on host
+```
 

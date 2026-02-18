@@ -117,36 +117,50 @@ func RunContainer(container *Container) error {
 }
 
 func handleChild(container *Container) error {
+	mergedRootFS := container.RootFS + "/../merged"
+
+	// create overlay mount
+	common.Must(os.MkdirAll(container.RootFS+"/../merged", 0755))
+	common.Must(os.MkdirAll(container.RootFS+"/../overlay/upper", 0755))
+	common.Must(os.MkdirAll(container.RootFS+"/../overlay/work", 0755))
+	// Mount overlay
+	lower := container.RootFS
+	upper := container.RootFS + "/../overlay/upper"
+	work := container.RootFS + "/../overlay/work"
+	opts := "lowerdir=" + lower + ",upperdir=" + upper + ",workdir=" + work
+	common.Must(syscall.Mount("overlay", mergedRootFS, "overlay", 0, opts))
+
 	// mount nescessay stuff
 	//
 	// rootfs must be a mount point
 	// mount proc - pseudo filesystem
 	// mount tmpfs - dev
-	common.Must(os.MkdirAll(container.RootFS+"/proc", 0755))
-	common.Must(syscall.Mount("proc", container.RootFS+"/proc", "proc", 0, ""))
 
-	common.Must(os.MkdirAll(container.RootFS+"/dev", 0755))
-	common.Must(syscall.Mount("tmpfs", container.RootFS+"/dev", "tmpfs", 0, ""))
+	common.Must(os.MkdirAll(mergedRootFS+"/proc", 0755))
+	common.Must(syscall.Mount("proc", mergedRootFS+"/proc", "proc", 0, ""))
+
+	common.Must(os.MkdirAll(mergedRootFS+"/dev", 0755))
+	common.Must(syscall.Mount("tmpfs", mergedRootFS+"/dev", "tmpfs", 0, ""))
 
 	// required mount for interactive mode
-	common.Must(os.MkdirAll(container.RootFS+"/dev/pts", 0755))
+	common.Must(os.MkdirAll(mergedRootFS+"/dev/pts", 0755))
 	common.Must(
 		syscall.Mount(
 			"devpts",
-			container.RootFS+"/dev/pts",
+			mergedRootFS+"/dev/pts",
 			"devpts",
 			syscall.MS_NOSUID|syscall.MS_NOEXEC,
 			"newinstance,ptmxmode=0666,mode=620,gid=5",
 		),
 	)
-	common.Must(mknodChar(container.RootFS+"/dev/tty", 0o666, 5, 0))
-	common.Must(mknodChar(container.RootFS+"/dev/ptmx", 0o666, 5, 2))
+	common.Must(mknodChar(mergedRootFS+"/dev/tty", 0o666, 5, 0))
+	common.Must(mknodChar(mergedRootFS+"/dev/ptmx", 0o666, 5, 2))
 
 	// Best-effort minimal device nodes (requires CAP_MKNOD; may fail rootless)
-	common.Must(mknodChar(container.RootFS+"/dev/null", 0o666, 1, 3))
-	common.Must(mknodChar(container.RootFS+"/dev/zero", 0o666, 1, 5))
-	common.Must(mknodChar(container.RootFS+"/dev/random", 0o666, 1, 8))
-	common.Must(mknodChar(container.RootFS+"/dev/urandom", 0o666, 1, 9))
+	common.Must(mknodChar(mergedRootFS+"/dev/null", 0o666, 1, 3))
+	common.Must(mknodChar(mergedRootFS+"/dev/zero", 0o666, 1, 5))
+	common.Must(mknodChar(mergedRootFS+"/dev/random", 0o666, 1, 8))
+	common.Must(mknodChar(mergedRootFS+"/dev/urandom", 0o666, 1, 9))
 
 	logger.Log.Debug("done mounting")
 
@@ -155,9 +169,9 @@ func handleChild(container *Container) error {
 	//
 	_, err := os.Stat(container.RootFS)
 	common.Must(err)
-	unix.Mount(container.RootFS, container.RootFS, "", unix.MS_BIND|unix.MS_REC, "")
-	common.Must(os.MkdirAll(container.RootFS+"/old_root", 0o777))
-	common.Must(unix.PivotRoot(container.RootFS, container.RootFS+"/old_root"))
+	unix.Mount(mergedRootFS, mergedRootFS, "", unix.MS_BIND|unix.MS_REC, "")
+	common.Must(os.MkdirAll(container.RootFS+"/../merged/old_root", 0o777))
+	common.Must(unix.PivotRoot(container.RootFS+"/../merged", container.RootFS+"/../merged/old_root"))
 	common.Must(os.Chdir("/"))
 	common.Must(unix.Unmount("./old_root", syscall.MNT_DETACH))
 	logger.Log.Debug("done pivot root")
@@ -256,6 +270,7 @@ func mknodChar(path string, perm uint32, major, minor uint32) error {
 		logger.Log.Debug("mknodChar", zap.Error(err))
 	}
 
+	logger.Log.Debug("creating dir", zap.String("path", path))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
