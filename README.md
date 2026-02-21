@@ -70,3 +70,9 @@ sudo ./bin/xocker run --rootfs="./rootfs" --level="dev" -i -- /bin/ash
 # this file doesn't exit on host
 ```
 
+## Phase 5: Bridge Networking
+Concepts:
+- Bridge
+- veth
+Container when started will be connected to xocker0 bridge, and the container itself will be provided an IP for communication. 
+

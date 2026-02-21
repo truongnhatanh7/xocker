@@ -16,6 +16,8 @@ import (
 	"github.com/truongnhatanh7/xocker/internal/cgroupv2"
 	"github.com/truongnhatanh7/xocker/internal/common"
 	"github.com/truongnhatanh7/xocker/internal/logger"
+	"github.com/truongnhatanh7/xocker/internal/network"
+	"github.com/truongnhatanh7/xocker/internal/sync"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
@@ -37,8 +39,23 @@ func RunContainer(container *Container) error {
 	}
 
 	if os.Getenv("_IN_CONTAINER") == "1" {
-		return handleChild(container)
+		if err := handleChild(container); err != nil {
+			logger.Log.Error("handleChild failed", zap.Error(err))
+			return err
+		}
+		return nil
 	}
+
+	// should be ran via hook or separated cmd, for learning purpose -> create bridge here
+	network.CreateBridge()
+
+	// Initialize IP state file with base IP
+	common.Must(network.InitIPState("./ip.state"))
+
+	// Create socketpair for parent-child synchronization
+	parentConn, childConn, err := sync.CreateSocketPair()
+	common.Must(err)
+	defer parentConn.Close()
 
 	// process rootfs dir, "." doesn't work in some cases -> resolve to full path
 	absRootFS, err := filepath.Abs(container.RootFS)
@@ -87,10 +104,17 @@ func RunContainer(container *Container) error {
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 
+	// Pass child side of socketpair to child process via ExtraFiles
+	// The child will access it as fd 3
+	c.ExtraFiles = []*os.File{childConn}
+
 	os.Setenv("_IN_CONTAINER", "1")
 	c.Env = os.Environ()
 
 	common.Must(c.Start())
+
+	// Close child conn in parent (child has its own copy)
+	childConn.Close()
 
 	realPid, err := waitForChildPID(c.Process.Pid, 3*time.Second) // choose an appropriate timeout
 	if err != nil {
@@ -99,6 +123,29 @@ func RunContainer(container *Container) error {
 		common.Must(fmt.Errorf("could not find forked child of unshare (%d): %w", c.Process.Pid, err))
 	}
 	logger.Log.Debug("realpid", zap.Int("pid", realPid))
+
+	// Set up container networking from parent (host namespace)
+	containerIP, vethName, err := network.CreateVethAndAttachToBridge(realPid)
+	if err != nil {
+		c.Process.Kill()
+		common.Must(fmt.Errorf("failed to set up container network: %w", err))
+	}
+	logger.Log.Info("network configured for container",
+		zap.String("ip", containerIP),
+		zap.String("veth", vethName),
+		zap.Int("pid", realPid))
+
+	// Prepare network configuration to send to child
+	networkConfig := fmt.Sprintf("%s\n%s\n%s", containerIP, vethName, "172.18.0.1")
+
+	// Signal child that network is ready and send config
+	if err := sync.SignalReady(parentConn, networkConfig); err != nil {
+		c.Process.Kill()
+		common.Must(fmt.Errorf("failed to signal child: %w", err))
+	}
+	logger.Log.Debug("signaled child that network is ready")
+
+	// Set up cgroups
 	cg := cgroupv2.NewCgroupV2("container_" + time.Now().Format(time.RFC3339Nano))
 	cg.Limit(&cgroupv2.CgroupV2SetSpecs{
 		ApplyToPid: realPid,
@@ -111,30 +158,45 @@ func RunContainer(container *Container) error {
 	})
 	defer cg.Destroy()
 
-	common.Must(c.Wait())
+	if err := c.Wait(); err != nil {
+		logger.Log.Error("container process exited with error", zap.Error(err))
+		// Clean up IP before returning error
+		justIP := strings.Split(containerIP, "/")[0]
+		network.ReleaseIP("./ip.state", justIP)
+		return fmt.Errorf("container exited with error: %w", err)
+	}
+
+	// Clean up IP allocation when container exits
+	justIP := strings.Split(containerIP, "/")[0]
+	if err := network.ReleaseIP("./ip.state", justIP); err != nil {
+		logger.Log.Warn("failed to release IP", zap.String("ip", justIP), zap.Error(err))
+	}
 
 	return nil
 }
 
 func handleChild(container *Container) error {
+	childConn := os.NewFile(uintptr(3), "sync-pipe")
+	if childConn == nil {
+		return fmt.Errorf("failed to get sync connection from fd 3")
+	}
+	defer childConn.Close()
+
+	myPid := os.Getpid()
+	logger.Log.Debug("child process started", zap.Int("pid", myPid))
+
+	time.Sleep(100 * time.Millisecond)
+
 	mergedRootFS := container.RootFS + "/../merged"
 
-	// create overlay mount
 	common.Must(os.MkdirAll(container.RootFS+"/../merged", 0755))
 	common.Must(os.MkdirAll(container.RootFS+"/../overlay/upper", 0755))
 	common.Must(os.MkdirAll(container.RootFS+"/../overlay/work", 0755))
-	// Mount overlay
 	lower := container.RootFS
 	upper := container.RootFS + "/../overlay/upper"
 	work := container.RootFS + "/../overlay/work"
 	opts := "lowerdir=" + lower + ",upperdir=" + upper + ",workdir=" + work
 	common.Must(syscall.Mount("overlay", mergedRootFS, "overlay", 0, opts))
-
-	// mount nescessay stuff
-	//
-	// rootfs must be a mount point
-	// mount proc - pseudo filesystem
-	// mount tmpfs - dev
 
 	common.Must(os.MkdirAll(mergedRootFS+"/proc", 0755))
 	common.Must(syscall.Mount("proc", mergedRootFS+"/proc", "proc", 0, ""))
@@ -142,7 +204,6 @@ func handleChild(container *Container) error {
 	common.Must(os.MkdirAll(mergedRootFS+"/dev", 0755))
 	common.Must(syscall.Mount("tmpfs", mergedRootFS+"/dev", "tmpfs", 0, ""))
 
-	// required mount for interactive mode
 	common.Must(os.MkdirAll(mergedRootFS+"/dev/pts", 0755))
 	common.Must(
 		syscall.Mount(
@@ -156,7 +217,6 @@ func handleChild(container *Container) error {
 	common.Must(mknodChar(mergedRootFS+"/dev/tty", 0o666, 5, 0))
 	common.Must(mknodChar(mergedRootFS+"/dev/ptmx", 0o666, 5, 2))
 
-	// Best-effort minimal device nodes (requires CAP_MKNOD; may fail rootless)
 	common.Must(mknodChar(mergedRootFS+"/dev/null", 0o666, 1, 3))
 	common.Must(mknodChar(mergedRootFS+"/dev/zero", 0o666, 1, 5))
 	common.Must(mknodChar(mergedRootFS+"/dev/random", 0o666, 1, 8))
@@ -164,10 +224,36 @@ func handleChild(container *Container) error {
 
 	logger.Log.Debug("done mounting")
 
+	logger.Log.Debug("child waiting for network setup signal from parent")
+	networkConfig, err := sync.WaitForReady(childConn, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("timeout waiting for network setup: %w", err)
+	}
+	logger.Log.Debug("received network ready signal from parent")
+
+	configLines := strings.Split(strings.TrimSpace(networkConfig), "\n")
+	if len(configLines) != 3 {
+		return fmt.Errorf("invalid network config format, expected 3 lines, got %d", len(configLines))
+	}
+
+	containerIP := configLines[0]
+	vethName := configLines[1]
+	gatewayIP := configLines[2]
+
+	logger.Log.Debug("network config received",
+		zap.String("ip", containerIP),
+		zap.String("veth", vethName),
+		zap.String("gateway", gatewayIP))
+
+	// Configure network inside container namespace
+	if err := network.ConfigureContainerNetwork(vethName, containerIP, gatewayIP); err != nil {
+		return fmt.Errorf("failed to configure container network: %w", err)
+	}
+
 	// pivot root
 	// make newroot a mountpoint
 	//
-	_, err := os.Stat(container.RootFS)
+	_, err = os.Stat(container.RootFS)
 	common.Must(err)
 	unix.Mount(mergedRootFS, mergedRootFS, "", unix.MS_BIND|unix.MS_REC, "")
 	common.Must(os.MkdirAll(container.RootFS+"/../merged/old_root", 0o777))
